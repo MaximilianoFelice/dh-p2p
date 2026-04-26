@@ -21,14 +21,15 @@ MAIN_PORT = 8800
 
 USERNAME = "cba1b29e32cb17aa46b8ff9e73c7f40b"
 USERKEY = "996103384cdf19179e19243e959bbf8b"
-RANDSALT = "5daf91fc5cfc1be8e081cfb08f792726"
+RANDSALT = ""
 IV = b"2z52*lk9o6HRyJrf"
 
 CSEQ = 0
 
 
-def get_key(username, password):
-    key = f"{username}:Login to {RANDSALT}:{password}"
+def get_key(username, password, randsalt=None):
+    salt = randsalt if randsalt is not None else RANDSALT
+    key = f"{username}:Login to {salt}:{password}"
     return hashlib.md5(key.encode()).hexdigest().upper().encode()
 
 
@@ -60,7 +61,8 @@ def get_dec(key: bytes, nonce: int, data: str):
     return dec.decode()
 
 
-def get_auth(username, key, nonce, payload=""):
+def get_auth(username, key, nonce, payload="", randsalt=None):
+    salt = randsalt if randsalt is not None else RANDSALT
     curdate = int(time.time())
 
     message = f"{nonce}{curdate}{payload}".encode()
@@ -70,7 +72,7 @@ def get_auth(username, key, nonce, payload=""):
         f"<CreateDate>{curdate}</CreateDate>"
         f"<DevAuth>{auth}</DevAuth>"
         f"<Nonce>{nonce}</Nonce>"
-        f"<RandSalt>{RANDSALT}</RandSalt>"
+        f"<RandSalt>{salt}</RandSalt>"
         f"<UserName>{username}</UserName>"
     )
 

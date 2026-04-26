@@ -3,6 +3,7 @@ DH-P2P + PTCP Implementation
 """
 import argparse
 import datetime
+import os
 import random
 import select
 import socket
@@ -23,11 +24,12 @@ from helpers import (
 )
 
 
-def main(serial, dtype=0, username=None, password=None, debug=False):
+def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=None):
     socketserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    socketserver.bind(("0.0.0.0", 554))
+    listen_port = int(os.environ.get("DAHUA_LISTEN_PORT", "554"))
+    socketserver.bind(("0.0.0.0", listen_port))
     socketserver.listen(5)
-    print("Listening on port 554")
+    print(f"Listening on port {listen_port}")
 
     if debug:
         subprocess.Popen(
@@ -65,16 +67,17 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     aid = random.randbytes(8)
 
     if dtype > 0:
-        key = get_key(username, password)
+        key = get_key(username, password, randsalt)
         nonce = get_nonce()
 
         laddr = get_enc(key, nonce, laddr)
         ipaddr = f"<IpEncrptV2>true</IpEncrptV2><LocalAddr>{laddr}</LocalAddr>"
-        auth = "" if dtype == 0 else get_auth(username, key, nonce, laddr)
+        auth = get_auth(username, key, nonce, laddr, randsalt)
 
     res = device_remote.request(
         f"/device/{serial}/p2p-channel",
-        f"<body>{auth}<Identify>{' '.join(f'{b:x}' for b in aid)}</Identify>{ipaddr}<version>5.0.0</version></body>",
+        f"<body>{auth}<Identify>{' '.join(f'{b:x}' for b in aid)}</Identify>"
+        f"{ipaddr}<version>5.0.0</version></body>",
         should_read=False,
     )
 
@@ -122,7 +125,8 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     main_remote.rport = MAIN_PORT
 
     if dtype > 0:
-        auth = get_auth(username, key, nonce)
+        nonce2 = get_nonce()
+        auth = get_auth(username, key, nonce2, randsalt=randsalt)
 
     res = main_remote.request(
         f"/device/{serial}/relay-channel",
@@ -155,7 +159,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     eaddr = device_port.to_bytes(2) + socket.inet_aton(device_server)
     eaddr = bytes(0xFF - b for b in eaddr)
 
-    data = (
+    stun_init = (
         b"\xff\xfe\xff\xe7"
         + cookie
         + trasn_id
@@ -164,63 +168,77 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
         + b"\xff\xfb\xff\xf7\xff\xfe"
         + eaddr
     )
-    print(f":{device_remote.lport} >>> {device_remote.rhost}:{device_remote.rport}")
-    print("".join(f"\\x{b:02X}" for b in data))
-    device_remote.send(data)
 
-    try:
-        data = device_remote.recv(timeout=5)
-    except socket.timeout:
-        print("Timeout occurred while waiting for a response from the device.")
-        print("If the issue persists, you may need to use relay mode with this device.")
-        print("Note: Relay mode is currently not implemented for Python.")
+    local_ip, local_port_str = device_laddr.split(":")
+    local_port_val = int(local_port_str)
+    print(f":{device_remote.lport} >>> {local_ip}:{local_port_val} (LocalAddr)")
+    print("".join(f"\\x{b:02X}" for b in stun_init))
+    device_remote.sendto(stun_init, (local_ip, local_port_val))
+
+    print(f":{device_remote.lport} >>> {device_remote.rhost}:{device_remote.rport} (PubAddr)")
+    print("".join(f"\\x{b:02X}" for b in stun_init))
+    device_remote.send(stun_init)
+
+    import time
+    stun_response = None
+    device_remote.settimeout(2)
+    deadline = time.time() + 10
+    attempt = 0
+    while time.time() < deadline:
+        try:
+            data, addr = device_remote.recvfrom(4096)
+            magic = data[:4]
+            print(f"STUN <<< {addr[0]}:{addr[1]} magic={magic.hex()} len={len(data)}")
+            if magic == b"\xfe\xfe\xff\xe7":
+                stun_response = data
+                print("Got STUN response (fefeffe7)")
+                break
+            elif magic == b"\xff\xfe\xff\xe7":
+                print("Got device cross-STUN init (fffeffe7), responding...")
+                resp = (
+                    b"\xfe\xfe\xff\xe7"
+                    + data[4:8]
+                    + data[8:20]
+                    + b"\x7f\xd6\xff\xf7"
+                    + aid
+                    + b"\xff\xfb\xff\xf7\xff\xfe"
+                    + data[34:40]
+                )
+                device_remote.sendto(resp, addr)
+                print(f"STUN >>> {addr[0]}:{addr[1]} response sent")
+            else:
+                print(f"Unknown magic: {magic.hex()}")
+        except socket.timeout:
+            attempt += 1
+            if attempt <= 2:
+                print(f"Retransmit STUN init (attempt {attempt})")
+                device_remote.send(stun_init)
+            continue
+
+    if stun_response is None:
+        print("No STUN response received, exiting.")
         sys.exit(1)
 
-    print("Data <<<")
-    print("".join(f"\\x{b:02X}" for b in data))
-
-    rtrans_id = data[8:20]
-    ip, port = device_laddr.split(":")
-    port = int(port)
-    eaddr = port.to_bytes(2) + socket.inet_aton(ip)
-
-    data = (
-        b"\xfe\xfe\xff\xe7"
+    confirm = (
+        b"\xfe\xfe\xff\xf3"
         + cookie
-        + rtrans_id
+        + trasn_id
         + b"\x7f\xd6\xff\xf7"
         + aid
-        + b"\xff\xfb\xff\xf7\xff\xfe"
-        + eaddr
     )
-    print("Request >>>")
-    print("".join(f"\\x{b:02X}" for b in data))
-    device_remote.send(data)
-
-    if dtype > 0:
-        data = device_remote.recv()
-        print("Data <<<")
-        print("".join(f"\\x{b:02X}" for b in data))
-
-        data = (
-            b"\xfe\xfe\xff\xf3"
-            + cookie
-            + rtrans_id
-            + b"\x7f\xd6\xff\xf7"
-            + aid
-            + b"\xff\xfb\xff\xf7\xff\xfe"
-            + b"\xa8\x13\x3f\x57\xfe\x37"
-        )
-
-        for _ in range(5):
-            print("Request >>>")
-            print("".join(f"\\x{b:02X}" for b in data))
-            device_remote.send(data)
-
     for _ in range(5):
-        data = device_remote.recv()
-        print("Data <<<")
-        print("".join(f"\\x{b:02X}" for b in data))
+        print("Confirm >>>")
+        device_remote.send(confirm)
+
+    time.sleep(0.3)
+    device_remote.settimeout(0.5)
+    while True:
+        try:
+            data, addr = device_remote.recvfrom(4096)
+            print(f"Drain <<< {addr[0]}:{addr[1]} magic={data[:4].hex()} len={len(data)}")
+        except socket.timeout:
+            break
+    device_remote.settimeout(None)
 
     device_remote.request_ptcp(b"\x00\x03\x01\x00")
     res = device_remote.read_ptcp()
@@ -241,7 +259,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False):
     assert len(res.body) == 0
 
     print("Ready to connect")
-    print("Test with: rtsp://127.0.0.1/cam/realmonitor?channel=1&subtype=0")
+    print(f"Test with: rtsp://127.0.0.1:{listen_port}/cam/realmonitor?channel=1&subtype=0")
     while True:
         ready, _, _ = select.select([socketserver], [], [], 0.1)
 
@@ -364,6 +382,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--type", type=int, help="Type of the camera", default=0)
     parser.add_argument("-u", "--username", help="Username of the camera")
     parser.add_argument("-p", "--password", help="Password of the camera")
+    parser.add_argument("-s", "--randsalt", help="Device RandSalt (from Info blob)")
     args = parser.parse_args()
 
     if args.username is None or args.password is None:
@@ -373,4 +392,4 @@ if __name__ == "__main__":
             parser.error("Username and password are required in debug mode")
 
     if args.serial:
-        main(args.serial, args.type, args.username, args.password, args.debug)
+        main(args.serial, args.type, args.username, args.password, args.debug, args.randsalt)
