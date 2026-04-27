@@ -323,18 +323,15 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                 while ptcp_ready:
                     res = device_remote.read_ptcp()
 
-                    if len(res.body) == 0:
-                        continue
+                    if len(res.body) > 0:
+                        device_remote.request_ptcp()
 
-                    device_remote.request_ptcp()
-
-                    if res.body[0] != 0x10:
-                        print(f"PTCP <<< type={res.body[0]:#04x} len={len(res.body)}", flush=True)
-                        continue
-
-                    body = PTCPPayload.parse(res.body)
-                    print(f"DVR >>> TCP {len(body.payload)}B", flush=True)
-                    socketclient.send(body.payload)
+                        if res.body[0] == 0x10:
+                            body = PTCPPayload.parse(res.body)
+                            print(f"DVR >>> TCP {len(body.payload)}B", flush=True)
+                            socketclient.send(body.payload)
+                        else:
+                            print(f"PTCP <<< type={res.body[0]:#04x} len={len(res.body)}", flush=True)
 
                     ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
 
