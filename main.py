@@ -355,29 +355,8 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             print("Broken pipe", flush=True)
         finally:
             print("Cleaning up connection", flush=True)
-            device_remote.request_ptcp(
-                b"\x12\x00\x00\x00"
-                + realm_id.to_bytes(4, "big")
-                + b"\x00\x00\x00\x00"
-                + b"DISC"
-            )
-
-            device_remote.settimeout(5)
-            try:
-                res = device_remote.read_ptcp()
-                while len(res.body) == 0 or res.body[0] == 0x10:
-                    if len(res.body) > 0:
-                        device_remote.request_ptcp()
-                    res = device_remote.read_ptcp()
-                if res.body[0] == 0x12:
-                    device_remote.request_ptcp()
-            except socket.timeout:
-                print("Cleanup timeout, continuing", flush=True)
-            finally:
-                device_remote.settimeout(None)
-
             socketclient.close()
-            print("Connection closed", flush=True)
+            print("Connection closed, keeping PTCP channel alive", flush=True)
 
 
 if __name__ == "__main__":
