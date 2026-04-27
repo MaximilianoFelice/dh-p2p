@@ -241,7 +241,7 @@ Content-Length: {len(body)}
     def read_ptcp(self):
         data = self.recv()
         res = PTCP.parse(data)
-        self.ptcp_recv = max(self.ptcp_recv, res.rlid + len(res.body))
+        self.ptcp_recv = max(self.ptcp_recv, res.rlid + len(res.body)) & 0xFFFFFFFF
         self.rmid = res.lmid
         return res
 
@@ -249,12 +249,12 @@ Content-Length: {len(body)}
         ptcp = PTCP(
             self.ptcp_sent,
             self.ptcp_recv,
-            0x0002FFFF if body == b"\x00\x03\x01\x00" else 0x0000FFFF - self.ptcp_count,
+            0x0002FFFF if body == b"\x00\x03\x01\x00" else 0x0000FFFF - (self.ptcp_count % 0x10000),
             self.ptcp_id,
             self.rmid,
             body,
         )
-        self.ptcp_sent += len(ptcp.body)
+        self.ptcp_sent = (self.ptcp_sent + len(ptcp.body)) & 0xFFFFFFFF
         self.ptcp_id += 1
         if len(ptcp.body) > 0 and ptcp.body != b"\x00\x03\x01\x00":
             self.ptcp_count += 1
