@@ -188,8 +188,8 @@ class UDP(socket.socket):
 
         return data
 
-    def read(self, return_error=False):
-        data = self.recv().decode()
+    def read(self, return_error=False, timeout=30):
+        data = self.recv(timeout=timeout).decode()
 
         print(f":{self.lport} <<< {self.rhost}:{self.rport}")
         print(data.replace("\r\n", "\n"))
@@ -238,8 +238,8 @@ Content-Length: {len(body)}
 
         return self.read() if should_read else None
 
-    def read_ptcp(self):
-        data = self.recv()
+    def read_ptcp(self, timeout=30):
+        data = self.recv(timeout=timeout)
         res = PTCP.parse(data)
         self.ptcp_recv = max(self.ptcp_recv, res.rlid + len(res.body)) & 0xFFFFFFFF
         self.rmid = res.lmid
