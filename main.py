@@ -323,6 +323,8 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
 
     print(f"Ready, accepting connections on :{listen_port}", flush=True)
 
+    consecutive_bind_failures = 0
+
     while True:
         watch = [socketserver, device_remote] + [c["socket"] for c in clients.values()]
         readable, _, _ = select.select(watch, [], [], 1.0)
@@ -371,12 +373,14 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                     "cseq": cseq_base,
                 }
                 cseq_base += 1000
+                consecutive_bind_failures = 0
                 print(f"Bind OK realm={realm_id:#010x}, {len(clients)} active", flush=True)
             else:
-                print(f"Bind FAILED realm={realm_id:#010x}", flush=True)
+                consecutive_bind_failures += 1
+                print(f"Bind FAILED realm={realm_id:#010x} ({consecutive_bind_failures} consecutive)", flush=True)
                 socketclient.close()
-                if not clients and not channel_alive(device_remote, timeout=5):
-                    print("Channel dead, no active clients, exiting...", flush=True)
+                if consecutive_bind_failures >= 5:
+                    print("PTCP tunnel dead (5 consecutive bind failures), exiting...", flush=True)
                     sys.exit(1)
             continue
 
