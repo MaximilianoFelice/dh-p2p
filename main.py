@@ -26,6 +26,7 @@ from helpers import (
 
 def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=None):
     socketserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    socketserver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listen_port = int(os.environ.get("DAHUA_LISTEN_PORT", "554"))
     socketserver.bind(("0.0.0.0", listen_port))
     socketserver.listen(5)
@@ -240,23 +241,64 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             break
     device_remote.settimeout(None)
 
-    device_remote.request_ptcp(b"\x00\x03\x01\x00")
-    res = device_remote.read_ptcp()
-    assert res.body == b"\x00\x03\x01\x00"
+    def ptcp_handshake(remote, sign_token):
+        remote.request_ptcp(b"\x00\x03\x01\x00")
+        res = remote.read_ptcp()
+        assert res.body == b"\x00\x03\x01\x00"
 
-    device_remote.request_ptcp(
-        b"\x19\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + sign
-    )
-    res = device_remote.read_ptcp()
-    if len(res.body) == 0:
-        res = device_remote.read_ptcp()
-    assert res.body[0] == 0x1A
+        remote.request_ptcp(
+            b"\x19\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + sign_token
+        )
+        res = remote.read_ptcp()
+        if len(res.body) == 0:
+            res = remote.read_ptcp()
+        assert res.body[0] == 0x1A
 
-    device_remote.request_ptcp(
-        b"\x1b\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00"
-    )
-    res = device_remote.read_ptcp()
-    assert len(res.body) == 0
+        remote.request_ptcp(
+            b"\x1b\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00"
+        )
+        res = remote.read_ptcp()
+        assert len(res.body) == 0
+        print("PTCP handshake complete", flush=True)
+
+    def drain_ptcp(remote, timeout=3):
+        remote.settimeout(timeout)
+        drained = 0
+        try:
+            while True:
+                res = remote.read_ptcp()
+                drained += 1
+                if len(res.body) > 0:
+                    remote.request_ptcp()
+                    if res.body[0] == 0x12:
+                        print(f"Drain: got DISC realm={res.body[4:8].hex()}", flush=True)
+                    elif res.body[0] == 0x13:
+                        print("Drain: got keepalive (channel alive)", flush=True)
+                        return True
+                    else:
+                        print(f"Drain: type={res.body[0]:#04x} len={len(res.body)}", flush=True)
+        except socket.timeout:
+            pass
+        finally:
+            remote.settimeout(None)
+        print(f"Drain: {drained} packets, no keepalive", flush=True)
+        return drained > 0
+
+    def channel_alive(remote, timeout=5):
+        remote.settimeout(timeout)
+        try:
+            while True:
+                res = remote.read_ptcp()
+                if len(res.body) > 0:
+                    remote.request_ptcp()
+                    if res.body[0] == 0x13:
+                        return True
+        except socket.timeout:
+            return False
+        finally:
+            remote.settimeout(None)
+
+    ptcp_handshake(device_remote, sign)
 
     print("Ready to connect")
     print(f"Test with: rtsp://127.0.0.1:{listen_port}/cam/realmonitor?channel=1&subtype=0")
@@ -269,13 +311,12 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             if not ptcp_ready:
                 continue
 
-            # only simplex, duplex is not supported
             res = device_remote.read_ptcp()
             if len(res.body) == 0:
                 continue
 
             if res.body[0] != 0x13:
-                print(f"Unexpected PTCP keepalive type: {res.body[0]:#04x} body={res.body[:20].hex()}", flush=True)
+                print(f"Unexpected PTCP type: {res.body[0]:#04x} body={res.body[:20].hex()}", flush=True)
             device_remote.request_ptcp()
 
             continue
@@ -287,7 +328,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
         if client_ready:
             probe = socketclient.recv(1, socket.MSG_PEEK)
             if not probe:
-                print("Stale connection (already closed), skipping", flush=True)
+                print("Stale connection, skipping", flush=True)
                 socketclient.close()
                 continue
 
@@ -297,7 +338,6 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             b"\x11\x00\x00\x00"
             + realm_id.to_bytes(4, "big")
             + b"\x00\x00\x00\x00"
-            # port 554
             + b"\x00\x00\x02\x2A"
             + b"\x7f\x00\x00\x01",
         )
@@ -312,42 +352,51 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
         except (socket.timeout, AssertionError) as e:
             print(f"PTCP Bind failed: {e}", flush=True)
             socketclient.close()
+            if not channel_alive(device_remote, timeout=5):
+                print("Channel dead, exiting for restart...", flush=True)
+                sys.exit(1)
             continue
         finally:
             device_remote.settimeout(None)
 
+        dvr_disc = False
+        last_keepalive = time.time()
+        keepalive_cseq = 100
         try:
             while True:
-                ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
+                readable, _, _ = select.select([device_remote, socketclient], [], [], 1.0)
 
-                while ptcp_ready:
+                if device_remote in readable:
                     res = device_remote.read_ptcp()
-
                     if len(res.body) > 0:
                         device_remote.request_ptcp()
-
                         if res.body[0] == 0x10:
                             body = PTCPPayload.parse(res.body)
                             print(f"DVR >>> TCP {len(body.payload)}B", flush=True)
                             socketclient.send(body.payload)
+                        elif res.body[0] == 0x12:
+                            print(f"DVR sent DISC for realm", flush=True)
+                            dvr_disc = True
+                            break
                         else:
                             print(f"PTCP <<< type={res.body[0]:#04x} len={len(res.body)}", flush=True)
 
-                    ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
+                if socketclient in readable:
+                    data = socketclient.recv(4096)
+                    if not data:
+                        print("Client disconnected", flush=True)
+                        break
+                    print(f"TCP >>> PTCP {len(data)}B", flush=True)
+                    device_remote.request_ptcp(bytes(PTCPPayload(realm_id, data)))
+                    last_keepalive = time.time()
 
-                client_ready, _, _ = select.select([socketclient], [], [], 0)
-
-                if not client_ready:
-                    continue
-
-                data = socketclient.recv(4096)
-
-                if not data:
-                    print("Client disconnected", flush=True)
-                    break
-
-                print(f"TCP >>> PTCP {len(data)}B", flush=True)
-                device_remote.request_ptcp(bytes(PTCPPayload(realm_id, data)))
+                now = time.time()
+                if now - last_keepalive > 25:
+                    keepalive_req = f"OPTIONS * RTSP/1.0\r\nCSeq: {keepalive_cseq}\r\n\r\n"
+                    device_remote.request_ptcp(bytes(PTCPPayload(realm_id, keepalive_req.encode())))
+                    print(f"Sent RTSP keepalive (CSeq: {keepalive_cseq})", flush=True)
+                    keepalive_cseq += 1
+                    last_keepalive = now
 
         except ConnectionResetError:
             print("Connection reset by peer", flush=True)
@@ -356,7 +405,20 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
         finally:
             print("Cleaning up connection", flush=True)
             socketclient.close()
-            print("Connection closed, keeping PTCP channel alive", flush=True)
+            if not dvr_disc:
+                device_remote.request_ptcp(
+                    b"\x12\x00\x00\x00"
+                    + realm_id.to_bytes(4, "big")
+                    + b"\x00\x00\x00\x00"
+                    + b"DISC",
+                )
+                print("Sent DISC for realm", flush=True)
+            drain_ptcp(device_remote, timeout=3)
+            if channel_alive(device_remote, timeout=10):
+                print("Channel alive, ready for new connections", flush=True)
+            else:
+                print("Channel dead, exiting for restart...", flush=True)
+                sys.exit(1)
 
 
 if __name__ == "__main__":

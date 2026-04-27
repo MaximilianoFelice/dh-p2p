@@ -241,17 +241,14 @@ Content-Length: {len(body)}
     def read_ptcp(self):
         data = self.recv()
 
-        if self.debug:
-            print(f":{self.lport} <<< {self.rhost}:{self.rport}")
-            # print(data)
-
         res = PTCP.parse(data)
-        self.ptcp_recv += len(res.body)
+        # Sync with DVR's actual byte counter: rlid + body = DVR ptcp_sent after this packet.
+        # max() filters out anomalous rlid from DISC/realm packets.
+        self.ptcp_recv = max(self.ptcp_recv, res.rlid + len(res.body))
         self.rmid = res.lmid
 
-        if self.debug:
-            # print("Parsed <<<")
-            print(res)
+        btype = f"{res.body[0]:#04x}" if res.body else "empty"
+        print(f"PTCP <<< rlid={res.rlid} llid={res.llid} pid={res.pid:#010x} lmid={res.lmid} rmid={res.rmid} body={len(res.body)}B type={btype} recv={self.ptcp_recv}", flush=True)
 
         return res
 
@@ -270,9 +267,7 @@ Content-Length: {len(body)}
         if len(ptcp.body) > 0 and ptcp.body != b"\x00\x03\x01\x00":
             self.ptcp_count += 1
 
-        if self.debug:
-            print(f":{self.lport} >>> {self.rhost}:{self.rport}")
-            print(ptcp)
+        print(f"PTCP >>> rlid={ptcp.rlid} llid={ptcp.llid} pid={ptcp.pid:#010x} lmid={ptcp.lmid} rmid={ptcp.rmid} body={len(ptcp.body)}B", flush=True)
         self.send(bytes(ptcp))
 
 
