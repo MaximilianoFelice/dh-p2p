@@ -274,15 +274,25 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             if len(res.body) == 0:
                 continue
 
-            assert res.body[0] == 0x13
+            if res.body[0] != 0x13:
+                print(f"Unexpected PTCP keepalive type: {res.body[0]:#04x} body={res.body[:20].hex()}", flush=True)
             device_remote.request_ptcp()
 
             continue
 
         socketclient, address = socketserver.accept()
-        print(f"Connection from {address}")
+        print(f"Connection from {address}", flush=True)
+
+        client_ready, _, _ = select.select([socketclient], [], [], 0)
+        if client_ready:
+            probe = socketclient.recv(1, socket.MSG_PEEK)
+            if not probe:
+                print("Stale connection (already closed), skipping", flush=True)
+                socketclient.close()
+                continue
 
         realm_id = random.randint(0x00000000, 0xFFFFFFFF)
+        print(f"PTCP Bind: realm={realm_id:#010x}", flush=True)
         device_remote.request_ptcp(
             b"\x11\x00\x00\x00"
             + realm_id.to_bytes(4, "big")
@@ -291,16 +301,25 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
             + b"\x00\x00\x02\x2A"
             + b"\x7f\x00\x00\x01",
         )
-        res = device_remote.read_ptcp()
-        if len(res.body) == 0:
-            res = device_remote.read_ptcp()
-        assert res.body[0] == 0x12
+        device_remote.settimeout(10)
+        try:
+            for _bind_attempt in range(5):
+                res = device_remote.read_ptcp()
+                if len(res.body) > 0:
+                    break
+            assert res.body[0] == 0x12, f"Expected 0x12, got {res.body[0]:#04x}"
+            print("PTCP Bind OK", flush=True)
+        except (socket.timeout, AssertionError) as e:
+            print(f"PTCP Bind failed: {e}", flush=True)
+            socketclient.close()
+            continue
+        finally:
+            device_remote.settimeout(None)
 
         try:
             while True:
                 ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
 
-                # if ptcp_ready:
                 while ptcp_ready:
                     res = device_remote.read_ptcp()
 
@@ -310,18 +329,11 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                     device_remote.request_ptcp()
 
                     if res.body[0] != 0x10:
+                        print(f"PTCP <<< type={res.body[0]:#04x} len={len(res.body)}", flush=True)
                         continue
 
                     body = PTCPPayload.parse(res.body)
-
-                    if debug:
-                        print()
-                        print(body)
-                        print(f"[{datetime.datetime.now().isoformat()}]")
-                        print("Data <<<")
-                        print(body.payload)
-                        print()
-
+                    print(f"DVR >>> TCP {len(body.payload)}B", flush=True)
                     socketclient.send(body.payload)
 
                     ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
@@ -334,25 +346,18 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                 data = socketclient.recv(4096)
 
                 if not data:
-                    print("Connection closed?")
+                    print("Client disconnected", flush=True)
                     break
 
-                if debug:
-                    print()
-                    print(f"[{datetime.datetime.now().isoformat()}]")
-                    print("Data >>>")
-                    print(data)
-                    print()
-
+                print(f"TCP >>> PTCP {len(data)}B", flush=True)
                 device_remote.request_ptcp(bytes(PTCPPayload(realm_id, data)))
 
-        # handle connection reset by peer
         except ConnectionResetError:
-            print("Connection reset by peer")
+            print("Connection reset by peer", flush=True)
         except BrokenPipeError:
-            print("Broken pipe")
+            print("Broken pipe", flush=True)
         finally:
-            print("Cleaning up connection")
+            print("Cleaning up connection", flush=True)
             device_remote.request_ptcp(
                 b"\x12\x00\x00\x00"
                 + realm_id.to_bytes(4, "big")
@@ -360,19 +365,22 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                 + b"DISC"
             )
 
-            res = device_remote.read_ptcp()
-
-            while len(res.body) == 0 or res.body[0] == 0x10:
-                if len(res.body) > 0:
-                    device_remote.request_ptcp()
-
+            device_remote.settimeout(5)
+            try:
                 res = device_remote.read_ptcp()
-
-            assert res.body[0] == 0x12
-            device_remote.request_ptcp()
+                while len(res.body) == 0 or res.body[0] == 0x10:
+                    if len(res.body) > 0:
+                        device_remote.request_ptcp()
+                    res = device_remote.read_ptcp()
+                if res.body[0] == 0x12:
+                    device_remote.request_ptcp()
+            except socket.timeout:
+                print("Cleanup timeout, continuing", flush=True)
+            finally:
+                device_remote.settimeout(None)
 
             socketclient.close()
-            print("Connection closed")
+            print("Connection closed", flush=True)
 
 
 if __name__ == "__main__":
