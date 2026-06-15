@@ -1,0 +1,20 @@
+main.py
+  s_e4f7e1c6e867ac::t_34c40b8f614a3d 392,400-409
+  s_e4f7e1c6e867ac::t_9f6c2c8823de08 326-338,341
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "441650e1db890d31e63570ae6731cce1d1817693",
+  "prompts": {},
+  "sessions": {
+    "s_e4f7e1c6e867ac": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "791de64a-46ae-4852-88f3-f97e5025e16f",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Maximiliano Felice <maximiliano.felice@mercadolibre.com>"
+    }
+  }
+}
