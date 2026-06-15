@@ -323,7 +323,18 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
 
     print(f"Ready, accepting connections on :{listen_port}", flush=True)
 
+    # Bind failures inside a short window mean the tunnel is dead. A failure
+    # older than the cooldown is treated as transient (e.g. an ARP storm or a
+    # downstream client probe-without-SYN) and resets the counter — only a
+    # genuine sustained burst trips the exit. The previous threshold of 5 with
+    # no cooldown was too tight: Frigate reconnecting 14 cameras at once would
+    # legitimately produce 5 quick failures and kill us, churning every
+    # downstream RTSP consumer.
+    BIND_FAILURE_THRESHOLD = 15
+    BIND_FAILURE_COOLDOWN_S = 30
+
     consecutive_bind_failures = 0
+    last_bind_failure_ts = 0.0
 
     while True:
         watch = [socketserver, device_remote] + [c["socket"] for c in clients.values()]
@@ -376,11 +387,19 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                 consecutive_bind_failures = 0
                 print(f"Bind OK realm={realm_id:#010x}, {len(clients)} active", flush=True)
             else:
+                now_ts = time.time()
+                if now_ts - last_bind_failure_ts > BIND_FAILURE_COOLDOWN_S:
+                    consecutive_bind_failures = 0
                 consecutive_bind_failures += 1
+                last_bind_failure_ts = now_ts
                 print(f"Bind FAILED realm={realm_id:#010x} ({consecutive_bind_failures} consecutive)", flush=True)
                 socketclient.close()
-                if consecutive_bind_failures >= 5:
-                    print("PTCP tunnel dead (5 consecutive bind failures), exiting...", flush=True)
+                if consecutive_bind_failures >= BIND_FAILURE_THRESHOLD:
+                    print(
+                        f"PTCP tunnel dead ({BIND_FAILURE_THRESHOLD} bind failures "
+                        f"within {BIND_FAILURE_COOLDOWN_S}s), exiting...",
+                        flush=True,
+                    )
                     sys.exit(1)
             continue
 
