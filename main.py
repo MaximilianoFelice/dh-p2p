@@ -323,18 +323,22 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
 
     print(f"Ready, accepting connections on :{listen_port}", flush=True)
 
-    # Bind failures inside a short window mean the tunnel is dead. A failure
-    # older than the cooldown is treated as transient (e.g. an ARP storm or a
-    # downstream client probe-without-SYN) and resets the counter — only a
-    # genuine sustained burst trips the exit. The previous threshold of 5 with
-    # no cooldown was too tight: Frigate reconnecting 14 cameras at once would
-    # legitimately produce 5 quick failures and kill us, churning every
-    # downstream RTSP consumer.
-    BIND_FAILURE_THRESHOLD = 15
-    BIND_FAILURE_COOLDOWN_S = 30
+    # Tunnel-dead detection. The previous version reset the failure counter
+    # whenever 30s passed between failures, which sounds reasonable but breaks
+    # the most common dead-tunnel scenario: clients trickle in slowly (e.g.
+    # Frigate retrying 14 cameras one at a time after a stream restart), each
+    # bind fails, and because the failures are >30s apart the counter never
+    # grows past 1 — so the watchdog never fires and the tunnel stays zombi
+    # forever. The correct invariant is: only a successful bind clears the
+    # "tunnel is healthy" signal. Two independent triggers:
+    #   1. N consecutive failures with NO OK in between (sustained burst).
+    #   2. No successful bind for TUNNEL_DEAD_TIMEOUT_S while at least a few
+    #      binds were attempted (slow-trickle dead tunnel).
+    BIND_FAILURE_THRESHOLD = 10
+    TUNNEL_DEAD_TIMEOUT_S = 300
 
     consecutive_bind_failures = 0
-    last_bind_failure_ts = 0.0
+    last_bind_ok_ts = time.time()
 
     while True:
         watch = [socketserver, device_remote] + [c["socket"] for c in clients.values()]
@@ -385,19 +389,24 @@ def main(serial, dtype=0, username=None, password=None, debug=False, randsalt=No
                 }
                 cseq_base += 1000
                 consecutive_bind_failures = 0
+                last_bind_ok_ts = time.time()
                 print(f"Bind OK realm={realm_id:#010x}, {len(clients)} active", flush=True)
             else:
-                now_ts = time.time()
-                if now_ts - last_bind_failure_ts > BIND_FAILURE_COOLDOWN_S:
-                    consecutive_bind_failures = 0
                 consecutive_bind_failures += 1
-                last_bind_failure_ts = now_ts
                 print(f"Bind FAILED realm={realm_id:#010x} ({consecutive_bind_failures} consecutive)", flush=True)
                 socketclient.close()
                 if consecutive_bind_failures >= BIND_FAILURE_THRESHOLD:
                     print(
-                        f"PTCP tunnel dead ({BIND_FAILURE_THRESHOLD} bind failures "
-                        f"within {BIND_FAILURE_COOLDOWN_S}s), exiting...",
+                        f"PTCP tunnel dead ({consecutive_bind_failures} consecutive "
+                        f"bind failures with no OK in between), exiting...",
+                        flush=True,
+                    )
+                    sys.exit(1)
+                time_since_ok = time.time() - last_bind_ok_ts
+                if time_since_ok >= TUNNEL_DEAD_TIMEOUT_S and consecutive_bind_failures >= 3:
+                    print(
+                        f"PTCP tunnel dead (no successful bind in {time_since_ok:.0f}s, "
+                        f"{consecutive_bind_failures} failures since), exiting...",
                         flush=True,
                     )
                     sys.exit(1)
